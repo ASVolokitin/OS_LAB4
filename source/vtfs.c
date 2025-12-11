@@ -34,9 +34,7 @@ static void __exit vtfs_exit(void) {
 }
 
 struct file_system_type vtfs_fs_type = {
-    .name = "vtfs",
-    .mount = vtfs_mount,
-    .kill_sb = vtfs_kill_sb
+    .name = "vtfs", .mount = vtfs_mount, .kill_sb = vtfs_kill_sb
 };
 
 struct dentry* vtfs_mount(
@@ -89,44 +87,52 @@ void vtfs_kill_sb(struct super_block* sb) {
 struct dentry* vtfs_lookup(
     struct inode* parent_inode, struct dentry* child_dentry, unsigned int flag
 ) {
+  ino_t root = parent_inode->i_ino;
+  const char* name = child_dentry->d_name.name;
+  if (root == 1000 && !strcmp(name, "test.txt")) {
+    struct inode* inode = vtfs_get_inode(parent_inode->i_sb, NULL, S_IFREG, 1001);
+    d_add(child_dentry, inode);
+  } else if (root == 1000 && !strcmp(name, "dir")) {
+    struct inode* inode = vtfs_get_inode(parent_inode->i_sb, NULL, S_IFDIR, 2000);
+    d_add(child_dentry, inode);
+  }
   return NULL;
 }
 
-int vtfs_iterate(struct file *filp, struct dir_context *ctx) {
-    struct dentry *dentry = filp->f_path.dentry;
-    struct inode *inode = dentry->d_inode;
-    unsigned long offset = filp->f_pos;
-    int stored = 0;
-    int ino = inode->i_ino;
+int vtfs_iterate(struct file* filp, struct dir_context* ctx) {
+  struct dentry* dentry = filp->f_path.dentry;
+  struct inode* inode = dentry->d_inode;
+  unsigned long offset = filp->f_pos;
+  int ino = inode->i_ino;
 
-    if (ino != 1000)
-        return 0;
-
-    if (offset == 0) {
-        if (!dir_emit(ctx, ".", 1, ino, DT_DIR))
-            return 0;
-        ctx->pos++;
-        filp->f_pos = ctx->pos;
-        return 0;
-    }
-
-    if (offset == 1) {
-        if (!dir_emit(ctx, "..", 2, dentry->d_parent->d_inode->i_ino, DT_DIR))
-            return 0;
-        ctx->pos++;
-        filp->f_pos = ctx->pos;
-        return 0;
-    }
-
-    if (offset == 2) {
-        if (!dir_emit(ctx, "test.txt", 8, 1001, DT_REG))
-            return 0;
-        ctx->pos++;
-        filp->f_pos = ctx->pos;
-        return 0;
-    }
-
+  if (ino != 1000)
     return 0;
+
+  if (offset == 0) {
+    if (!dir_emit(ctx, ".", 1, ino, DT_DIR))
+      return 0;
+    ctx->pos++;
+    filp->f_pos = ctx->pos;
+    return 0;
+  }
+
+  if (offset == 1) {
+    if (!dir_emit(ctx, "..", 2, dentry->d_parent->d_inode->i_ino, DT_DIR))
+      return 0;
+    ctx->pos++;
+    filp->f_pos = ctx->pos;
+    return 0;
+  }
+
+  if (offset == 2) {
+    if (!dir_emit(ctx, "test.txt", 8, 1001, DT_REG))
+      return 0;
+    ctx->pos++;
+    filp->f_pos = ctx->pos;
+    return 0;
+  }
+
+  return 0;
 }
 
 module_init(vtfs_init);
