@@ -5,10 +5,19 @@
 #include <linux/mnt_idmapping.h>
 #include <linux/module.h>
 #include <linux/printk.h>
+#include <linux/string.h>
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("sashka");
 MODULE_DESCRIPTION("A simple FS kernel module");
+
+struct inode_operations vtfs_inode_ops = {
+    .lookup = vtfs_lookup,
+};
+
+struct file_operations vtfs_dir_ops = {
+    .iterate_shared = vtfs_iterate,
+};
 
 static int __init vtfs_init(void) {
   LOG("VTFS joined the kernel\n");
@@ -27,7 +36,7 @@ static void __exit vtfs_exit(void) {
 struct file_system_type vtfs_fs_type = {
     .name = "vtfs",
     .mount = vtfs_mount,
-    .kill_sb = vtfs_kill_sb,
+    .kill_sb = vtfs_kill_sb
 };
 
 struct dentry* vtfs_mount(
@@ -44,10 +53,19 @@ struct dentry* vtfs_mount(
 
 int vtfs_fill_super(struct super_block* sb, void* data, int silent) {
   struct inode* inode = vtfs_get_inode(sb, NULL, S_IFDIR, 1000);
+
+  if (!inode)
+    return -ENOMEM;
+
+  inode->i_op = &vtfs_inode_ops;
+  inode->i_fop = &vtfs_dir_ops;
+
   sb->s_root = d_make_root(inode);
   if (sb->s_root == NULL) {
+    iput(inode);
     return -ENOMEM;
   }
+
   printk(KERN_INFO "return 0\n");
   return 0;
 }
@@ -58,6 +76,7 @@ struct inode* vtfs_get_inode(
   struct inode* inode = new_inode(sb);
   if (inode != NULL) {
     inode_init_owner(&nop_mnt_idmap, inode, dir, mode);
+    inode->i_mode = mode | 0777;
   }
   inode->i_ino = i_ino;
   return inode;
@@ -65,6 +84,49 @@ struct inode* vtfs_get_inode(
 
 void vtfs_kill_sb(struct super_block* sb) {
   printk(KERN_INFO "vtfs super block is destroyed. Unmount successfully.\n");
+}
+
+struct dentry* vtfs_lookup(
+    struct inode* parent_inode, struct dentry* child_dentry, unsigned int flag
+) {
+  return NULL;
+}
+
+int vtfs_iterate(struct file *filp, struct dir_context *ctx) {
+    struct dentry *dentry = filp->f_path.dentry;
+    struct inode *inode = dentry->d_inode;
+    unsigned long offset = filp->f_pos;
+    int stored = 0;
+    int ino = inode->i_ino;
+
+    if (ino != 1000)
+        return 0;
+
+    if (offset == 0) {
+        if (!dir_emit(ctx, ".", 1, ino, DT_DIR))
+            return 0;
+        ctx->pos++;
+        filp->f_pos = ctx->pos;
+        return 0;
+    }
+
+    if (offset == 1) {
+        if (!dir_emit(ctx, "..", 2, dentry->d_parent->d_inode->i_ino, DT_DIR))
+            return 0;
+        ctx->pos++;
+        filp->f_pos = ctx->pos;
+        return 0;
+    }
+
+    if (offset == 2) {
+        if (!dir_emit(ctx, "test.txt", 8, 1001, DT_REG))
+            return 0;
+        ctx->pos++;
+        filp->f_pos = ctx->pos;
+        return 0;
+    }
+
+    return 0;
 }
 
 module_init(vtfs_init);
