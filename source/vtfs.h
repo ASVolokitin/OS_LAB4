@@ -27,9 +27,13 @@ struct dentry* vtfs_mkdir(
     struct mnt_idmap* idmap, struct inode* parent_inode, struct dentry* child_dentry, umode_t mode
 );
 
-    int vtfs_unlink(struct inode* parent_inode, struct dentry* child_dentry);
+int vtfs_unlink(struct inode* parent_inode, struct dentry* child_dentry);
 
 int vtfs_rmdir(struct inode* parent_inode, struct dentry* child_dentry);
+
+ssize_t vtfs_read(struct file* filp, char __user* buffer, size_t len, loff_t* offset);
+
+ssize_t vtfs_write(struct file* filp, const char __user* buffer, size_t len, loff_t* offset);
 
 int vtfs_iterate(struct file* filp, struct dir_context* ctx);
 

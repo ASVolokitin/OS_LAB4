@@ -10,6 +10,8 @@
 struct vtfs_ram_node {
   struct vtfs_node_meta meta;
   char name[NAME_MAX + 1];
+  char* data;
+  size_t capacity;
   struct vtfs_ram_node* next;
 };
 
@@ -41,7 +43,7 @@ static struct vtfs_ram_node* vtfs_find_child(vtfs_ino_t parent, const char* name
 }
 
 static struct vtfs_ram_node* vtfs_alloc_node(void) {
-  struct vtfs_ram_node* node = kmalloc(sizeof(*node), GFP_KERNEL);
+  struct vtfs_ram_node* node = kzalloc(sizeof(*node), GFP_KERNEL);
   if (!node)
     return NULL;
 
@@ -205,7 +207,7 @@ int vtfs_storage_unlink(vtfs_ino_t parent, const char* name) {
 
 int vtfs_storage_rmdir(vtfs_ino_t parent, const char* name) {
   struct vtfs_ram_node* prev = NULL;
-  struct vtfs_ram_node* cur  = vtfs_nodes_head;
+  struct vtfs_ram_node* cur = vtfs_nodes_head;
 
   while (cur) {
     if (cur->meta.parent_ino == parent && !strcmp(cur->name, name)) {
@@ -228,8 +230,69 @@ int vtfs_storage_rmdir(vtfs_ino_t parent, const char* name) {
       return 0;
     }
     prev = cur;
-    cur  = cur->next;
+    cur = cur->next;
   }
 
   return -ENOENT;
+}
+
+static int vtfs_reserve_data(struct vtfs_ram_node* node, size_t needed) {
+  size_t new_cap = max_t(size_t, 2 * node->capacity, needed);
+  char* new_data = krealloc(node->data, new_cap, GFP_KERNEL);
+  if (!new_data)
+    return -ENOMEM;
+
+  if (new_cap > node->capacity)
+    memset(new_data + node->capacity, 0, new_cap - node->capacity);
+
+  node->data = new_data;
+  node->capacity = new_cap;
+
+  return 0;
+}
+
+ssize_t vtfs_storage_read_file(vtfs_ino_t ino, loff_t offset, size_t len, char* dst) {
+  struct vtfs_ram_node* node = vtfs_find_node_by_ino(ino);
+  if (!node)
+    return -ENOENT;
+
+  if (node->meta.type != VTFS_NODE_FILE)
+    return -EPERM;
+
+  if (offset >= node->meta.size)
+    return 0;
+
+  size_t to_copy = min_t(size_t, len, node->meta.size - offset);
+  memcpy(dst, node->data + offset, to_copy);
+
+  return to_copy;
+}
+
+ssize_t vtfs_storage_write_file(
+    vtfs_ino_t ino, loff_t offset, const char* src, size_t len, loff_t* new_size
+) {
+  struct vtfs_ram_node* node = vtfs_find_node_by_ino(ino);
+  if (!node)
+    return -ENOENT;
+
+  if (node->meta.type != VTFS_NODE_FILE)
+    return -EPERM;
+
+  size_t end = offset + len;
+  if (end > node->capacity) {
+    int err = vtfs_reserve_data(node, end);
+    if (err)
+      return err;
+  }
+
+  if (offset > node->meta.size)
+    memset(node->data + node->meta.size, 0, offset - node->meta.size);
+
+  memcpy(node->data + offset, src, len);
+  node->meta.size = max_t(loff_t, node->meta.size, end);
+
+  if (new_size)
+    *new_size = node->meta.size;
+
+  return len;
 }

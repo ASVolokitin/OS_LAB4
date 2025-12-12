@@ -6,6 +6,7 @@
 #include <linux/module.h>
 #include <linux/printk.h>
 #include <linux/string.h>
+#include <linux/uaccess.h>
 
 #include "vtfs_backend.h"
 
@@ -27,6 +28,8 @@ struct file_operations vtfs_dir_ops = {
 
 struct file_operations vtfs_file_ops = {
     .open = vtfs_open,
+    .read = vtfs_read,
+    .write = vtfs_write,
 };
 
 static int __init vtfs_init(void) {
@@ -232,6 +235,50 @@ int vtfs_unlink(struct inode* parent_inode, struct dentry* child_dentry) {
 int vtfs_rmdir(struct inode* parent_inode, struct dentry* child_dentry) {
   const char* name = child_dentry->d_name.name;
   return vtfs_storage_rmdir(parent_inode->i_ino, name);
+}
+
+ssize_t vtfs_read(struct file* filp, char __user* buffer, size_t len, loff_t* offset) {
+  if (!len)
+    return 0;
+
+  char* kbuf = kmalloc(len, GFP_KERNEL);
+  if (!kbuf)
+    return -ENOMEM;
+
+  ssize_t copied = vtfs_storage_read_file(filp->f_inode->i_ino, *offset, len, kbuf);
+  if (copied < 0) {
+    kfree(kbuf);
+    return copied;
+  }
+
+  if (copy_to_user(buffer, kbuf, copied)) {
+    kfree(kbuf);
+    return -EFAULT;
+  }
+
+  *offset += copied;
+  kfree(kbuf);
+  return copied;
+}
+
+ssize_t vtfs_write(struct file* filp, const char __user* buffer, size_t len, loff_t* offset) {
+  if (!len)
+    return 0;
+
+  char* kbuf = memdup_user(buffer, len);
+  if (IS_ERR(kbuf))
+    return PTR_ERR(kbuf);
+
+  loff_t new_size;
+  ssize_t written = vtfs_storage_write_file(filp->f_inode->i_ino, *offset, kbuf, len, &new_size);
+  kfree(kbuf);
+
+  if (written < 0)
+    return written;
+
+  *offset += written;
+  filp->f_inode->i_size = new_size;
+  return written;
 }
 
 module_init(vtfs_init);

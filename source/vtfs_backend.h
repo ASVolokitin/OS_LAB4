@@ -46,4 +46,10 @@ int vtfs_storage_mkdir(
 
 int vtfs_storage_rmdir(vtfs_ino_t parent, const char* name);
 
+ssize_t vtfs_storage_read_file(vtfs_ino_t ino, loff_t offset, size_t len, char* dst);
+
+ssize_t vtfs_storage_write_file(
+    vtfs_ino_t ino, loff_t offset, const char* src, size_t len, loff_t* new_size
+);
+
 #endif
