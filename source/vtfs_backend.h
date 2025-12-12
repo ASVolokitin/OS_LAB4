@@ -16,6 +16,7 @@ struct vtfs_node_meta {
   enum vtfs_node_type type;
   umode_t mode;
   loff_t size;
+  nlink_t nlink;
 };
 
 struct vtfs_dirent {
@@ -45,6 +46,10 @@ int vtfs_storage_mkdir(
 );
 
 int vtfs_storage_rmdir(vtfs_ino_t parent, const char* name);
+
+int vtfs_storage_link(
+    vtfs_ino_t parent, const char* name, vtfs_ino_t target_ino, struct vtfs_node_meta* out
+);
 
 ssize_t vtfs_storage_read_file(vtfs_ino_t ino, loff_t offset, size_t len, char* dst);
 

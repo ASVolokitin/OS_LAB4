@@ -51,4 +51,6 @@ struct inode* vtfs_get_inode(
     struct super_block* sb, const struct inode* dir, umode_t mode, int i_ino
 );
 
+int vtfs_link(struct dentry* old_dentry, struct inode* parent_inode, struct dentry* new_dentry);
+
 #endif
