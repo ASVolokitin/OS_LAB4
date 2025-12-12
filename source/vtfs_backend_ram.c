@@ -152,6 +152,33 @@ int vtfs_storage_create_file(
   return 0;
 }
 
+int vtfs_storage_mkdir(
+    vtfs_ino_t parent, const char* name, umode_t mode, struct vtfs_node_meta* out
+) {
+  if (vtfs_find_child(parent, name))
+    return -EEXIST;
+
+  struct vtfs_ram_node* parent_node = vtfs_find_node_by_ino(parent);
+  if (!parent_node || parent_node->meta.type != VTFS_NODE_DIR)
+    return -ENOTDIR;
+
+  struct vtfs_ram_node* node = vtfs_alloc_node();
+  if (!node)
+    return -ENOMEM;
+
+  node->meta.ino = vtfs_next_ino++;
+  node->meta.parent_ino = parent;
+  node->meta.type = VTFS_NODE_DIR;
+  node->meta.mode = S_IFDIR | (mode & 0777);
+  node->meta.size = 0;
+
+  strncpy(node->name, name, NAME_MAX);
+  node->name[NAME_MAX] = '\0';
+
+  *out = node->meta;
+  return 0;
+}
+
 int vtfs_storage_unlink(vtfs_ino_t parent, const char* name) {
   struct vtfs_ram_node* prev = NULL;
   struct vtfs_ram_node* cur = vtfs_nodes_head;
@@ -171,6 +198,37 @@ int vtfs_storage_unlink(vtfs_ino_t parent, const char* name) {
     }
     prev = cur;
     cur = cur->next;
+  }
+
+  return -ENOENT;
+}
+
+int vtfs_storage_rmdir(vtfs_ino_t parent, const char* name) {
+  struct vtfs_ram_node* prev = NULL;
+  struct vtfs_ram_node* cur  = vtfs_nodes_head;
+
+  while (cur) {
+    if (cur->meta.parent_ino == parent && !strcmp(cur->name, name)) {
+      if (cur->meta.type != VTFS_NODE_DIR)
+        return -ENOTDIR;
+
+      struct vtfs_ram_node* scan = vtfs_nodes_head;
+      while (scan) {
+        if (scan->meta.parent_ino == cur->meta.ino)
+          return -ENOTEMPTY;
+        scan = scan->next;
+      }
+
+      if (prev)
+        prev->next = cur->next;
+      else
+        vtfs_nodes_head = cur->next;
+
+      kfree(cur);
+      return 0;
+    }
+    prev = cur;
+    cur  = cur->next;
   }
 
   return -ENOENT;

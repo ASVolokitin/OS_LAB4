@@ -1,5 +1,4 @@
 #include "vtfs.h"
-#include "vtfs_backend.h"
 
 #include <linux/fs.h>
 #include <linux/init.h>
@@ -7,6 +6,8 @@
 #include <linux/module.h>
 #include <linux/printk.h>
 #include <linux/string.h>
+
+#include "vtfs_backend.h"
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("sashka");
@@ -16,6 +17,8 @@ struct inode_operations vtfs_inode_ops = {
     .lookup = vtfs_lookup,
     .create = vtfs_create,
     .unlink = vtfs_unlink,
+    .mkdir = vtfs_mkdir,
+    .rmdir = vtfs_rmdir,
 };
 
 struct file_operations vtfs_dir_ops = {
@@ -162,8 +165,7 @@ int vtfs_iterate(struct file* filp, struct dir_context* ctx) {
       if (err)
         break;
 
-      unsigned char dtype =
-          (ent.type == VTFS_NODE_DIR) ? DT_DIR : DT_REG;
+      unsigned char dtype = (ent.type == VTFS_NODE_DIR) ? DT_DIR : DT_REG;
 
       if (!dir_emit(ctx, ent.name, strlen(ent.name), ent.ino, dtype))
         break;
@@ -191,15 +193,11 @@ int vtfs_create(
   struct vtfs_node_meta meta;
   int err;
 
-  LOG("vtfs_create called! parent_inode=%lu, name=%s\n",
-      parent_inode->i_ino, name);
-
   err = vtfs_storage_create_file(parent_inode->i_ino, name, mode, &meta);
   if (err)
     return err;
 
-  struct inode* inode =
-      vtfs_get_inode(parent_inode->i_sb, NULL, meta.mode, meta.ino);
+  struct inode* inode = vtfs_get_inode(parent_inode->i_sb, NULL, meta.mode, meta.ino);
   if (!inode)
     return -ENOMEM;
 
@@ -207,9 +205,33 @@ int vtfs_create(
   return 0;
 }
 
+struct dentry* vtfs_mkdir(
+    struct mnt_idmap* idmap, struct inode* parent_inode, struct dentry* child_dentry, umode_t mode
+) {
+  const char* name = child_dentry->d_name.name;
+  struct vtfs_node_meta meta;
+  int err;
+
+  err = vtfs_storage_mkdir(parent_inode->i_ino, name, mode, &meta);
+  if (err)
+    return ERR_PTR(err);
+
+  struct inode* inode = vtfs_get_inode(parent_inode->i_sb, parent_inode, meta.mode, meta.ino);
+  if (!inode)
+    return ERR_PTR(-ENOMEM);
+
+  d_instantiate(child_dentry, inode);
+  return NULL;
+}
+
 int vtfs_unlink(struct inode* parent_inode, struct dentry* child_dentry) {
   const char* name = child_dentry->d_name.name;
   return vtfs_storage_unlink(parent_inode->i_ino, name);
+}
+
+int vtfs_rmdir(struct inode* parent_inode, struct dentry* child_dentry) {
+  const char* name = child_dentry->d_name.name;
+  return vtfs_storage_rmdir(parent_inode->i_ino, name);
 }
 
 module_init(vtfs_init);

@@ -40,4 +40,10 @@ int vtfs_storage_create_file(
 
 int vtfs_storage_unlink(vtfs_ino_t parent, const char* name);
 
+int vtfs_storage_mkdir(
+    vtfs_ino_t parent, const char* name, umode_t mode, struct vtfs_node_meta* out
+);
+
+int vtfs_storage_rmdir(vtfs_ino_t parent, const char* name);
+
 #endif

@@ -15,13 +15,25 @@ struct dentry* vtfs_lookup(
     struct inode* parent_inode, struct dentry* child_dentry, unsigned int flag
 );
 
-int vtfs_create(struct mnt_idmap *idmap, struct inode* parent_inode, struct dentry* child_dentry, umode_t mode, bool b);
+int vtfs_create(
+    struct mnt_idmap* idmap,
+    struct inode* parent_inode,
+    struct dentry* child_dentry,
+    umode_t mode,
+    bool b
+);
 
-int vtfs_unlink(struct inode* parent_inode, struct dentry* child_dentry);
+struct dentry* vtfs_mkdir(
+    struct mnt_idmap* idmap, struct inode* parent_inode, struct dentry* child_dentry, umode_t mode
+);
+
+    int vtfs_unlink(struct inode* parent_inode, struct dentry* child_dentry);
+
+int vtfs_rmdir(struct inode* parent_inode, struct dentry* child_dentry);
 
 int vtfs_iterate(struct file* filp, struct dir_context* ctx);
 
-int vtfs_open(struct inode *inode, struct file *filp);
+int vtfs_open(struct inode* inode, struct file* filp);
 
 struct dentry* vtfs_mount(
     struct file_system_type* fs_type, int flags, const char* token, void* data
