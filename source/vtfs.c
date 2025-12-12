@@ -231,9 +231,8 @@ struct dentry* vtfs_mkdir(
 
   inode->i_size = meta.size;
   set_nlink(inode, meta.nlink);
-  d_instantiate(child_dentry, inode);
+  d_add(child_dentry, inode);
   inc_nlink(parent_inode);
-  set_nlink(inode, meta.nlink);
   return NULL;
 }
 
