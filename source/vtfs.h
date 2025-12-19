@@ -2,6 +2,7 @@
 #define _VTFS_H
 
 #include <linux/fs.h>
+#include <linux/workqueue.h>
 
 #define MODULE_NAME "vtfs"
 #define LOG(fmt, ...) pr_info("[" MODULE_NAME "]: " fmt, ##__VA_ARGS__)
@@ -33,7 +34,11 @@ int vtfs_rmdir(struct inode* parent_inode, struct dentry* child_dentry);
 
 ssize_t vtfs_read(struct file* filp, char __user* buffer, size_t len, loff_t* offset);
 
+ssize_t vtfs_read_iter(struct kiocb* iocb, struct iov_iter* to);
+
 ssize_t vtfs_write(struct file* filp, const char __user* buffer, size_t len, loff_t* offset);
+
+ssize_t vtfs_write_iter(struct kiocb* iocb, struct iov_iter* from);
 
 int vtfs_iterate(struct file* filp, struct dir_context* ctx);
 

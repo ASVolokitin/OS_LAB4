@@ -1,18 +1,24 @@
 #include "vtfs.h"
 
+#include <linux/delay.h>
 #include <linux/fs.h>
+#include <linux/highmem.h>
 #include <linux/init.h>
+#include <linux/mm.h>
 #include <linux/mnt_idmapping.h>
 #include <linux/module.h>
 #include <linux/printk.h>
 #include <linux/string.h>
 #include <linux/uaccess.h>
+#include <linux/uio.h>
 
 #include "vtfs_backend.h"
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("sashka");
 MODULE_DESCRIPTION("A simple FS kernel module");
+
+#define VTFS_LATENCY_MS 5000
 
 struct inode_operations vtfs_inode_ops = {
     .lookup = vtfs_lookup,
@@ -28,32 +34,64 @@ struct file_operations vtfs_dir_ops = {
 };
 
 struct file_operations vtfs_file_ops = {
-    .open = vtfs_open,
-    .read = vtfs_read,
-    .write = vtfs_write,
+    // .read = vtfs_read,
+    // .write = vtfs_write,
+    .read_iter = vtfs_read_iter,
+    .write_iter = vtfs_write_iter,
 };
+
+struct vtfs_io_ctx {
+  struct kiocb* kiocb;
+  struct page** pages;
+  unsigned int nr_pages;
+  size_t page_offset;
+  vtfs_ino_t ino;
+  loff_t pos;
+  size_t len;
+  bool is_write;
+  char* kbuf;
+  struct work_struct work;
+};
+
+static struct workqueue_struct* vtfs_wq;
 
 static int __init vtfs_init(void) {
   int ret;
 
+  vtfs_wq = alloc_workqueue("vtfs_wq", WQ_UNBOUND | WQ_HIGHPRI, 0);
+  if (!vtfs_wq) {
+    LOG("Failed to create workqueue\n");
+    return -ENOMEM;
+  }
+
   ret = vtfs_storage_init();
   if (ret) {
     LOG("vtfs_storage_init failed: %d\n", ret);
+    destroy_workqueue(vtfs_wq);
+    vtfs_wq = NULL;
     return ret;
   }
 
-  LOG("VTFS joined the kernel\n");
   ret = register_filesystem(&vtfs_fs_type);
   if (ret) {
     LOG("Failed to register filesystem: %d\n", ret);
     vtfs_storage_shutdown();
+    destroy_workqueue(vtfs_wq);
+    vtfs_wq = NULL;
+    return ret;
   }
-  return ret;
+
+  LOG("VTFS joined the kernel\n");
+  return 0;
 }
 
 static void __exit vtfs_exit(void) {
   unregister_filesystem(&vtfs_fs_type);
   vtfs_storage_shutdown();
+  if (vtfs_wq) {
+    destroy_workqueue(vtfs_wq);
+    vtfs_wq = NULL;
+  }
   LOG("VTFS left the kernel\n");
 }
 
@@ -184,11 +222,6 @@ int vtfs_iterate(struct file* filp, struct dir_context* ctx) {
   return 0;
 }
 
-int vtfs_open(struct inode* inode, struct file* filp) {
-  LOG("vtfs_open called for inode %lu\n", inode->i_ino);
-  return 0;
-}
-
 int vtfs_create(
     struct mnt_idmap* idmap,
     struct inode* parent_inode,
@@ -247,6 +280,7 @@ int vtfs_rmdir(struct inode* parent_inode, struct dentry* child_dentry) {
 }
 
 ssize_t vtfs_read(struct file* filp, char __user* buffer, size_t len, loff_t* offset) {
+  LOG("IN READ\n");
   if (!len)
     return 0;
 
@@ -270,7 +304,159 @@ ssize_t vtfs_read(struct file* filp, char __user* buffer, size_t len, loff_t* of
   return copied;
 }
 
+static void vtfs_io_worker(struct work_struct* work) {
+  LOG("IN IO WORKER\n");
+  struct vtfs_io_ctx* ctx = container_of(work, struct vtfs_io_ctx, work);
+  ssize_t res = 0;
+
+  if (ctx->is_write) {
+    loff_t new_size;
+
+    if (VTFS_LATENCY_MS > 0) {
+      msleep(VTFS_LATENCY_MS);
+    }
+
+    res = vtfs_storage_write_file(ctx->ino, ctx->pos, ctx->kbuf, ctx->len, &new_size);
+    if (res > 0) {
+      struct inode* inode = file_inode(ctx->kiocb->ki_filp);
+      i_size_write(inode, new_size);
+      ctx->kiocb->ki_pos += res;
+    }
+  } else {
+    if (VTFS_LATENCY_MS > 0) {
+      msleep(VTFS_LATENCY_MS);
+    }
+
+    res = vtfs_storage_read_file(ctx->ino, ctx->pos, ctx->len, ctx->kbuf);
+    if (res > 0) {
+      if (ctx->pages && ctx->nr_pages > 0) {
+        size_t copied = 0;
+        size_t remaining = res;
+        unsigned int i = 0;
+        size_t off = ctx->page_offset;
+
+        while (remaining > 0 && i < ctx->nr_pages) {
+          size_t to_copy = min_t(size_t, remaining, PAGE_SIZE - off);
+          void* kaddr = kmap(ctx->pages[i]);
+          memcpy(kaddr + off, ctx->kbuf + copied, to_copy);
+          kunmap(ctx->pages[i]);
+          copied += to_copy;
+          remaining -= to_copy;
+          off = 0;
+          i++;
+        }
+
+        for (i = 0; i < ctx->nr_pages; i++) {
+          if (ctx->pages[i])
+            put_page(ctx->pages[i]);
+        }
+        kfree(ctx->pages);
+
+        if (copied != res) {
+          res = -EFAULT;
+        } else {
+          ctx->kiocb->ki_pos += res;
+        }
+      } else {
+        LOG("No pinned pages available\n");
+        res = -EFAULT;
+      }
+    } else if (ctx->pages) {
+      unsigned int i;
+      for (i = 0; i < ctx->nr_pages; i++) {
+        if (ctx->pages[i])
+          put_page(ctx->pages[i]);
+      }
+      kfree(ctx->pages);
+    }
+  }
+
+  if (res < 0) {
+    printk(KERN_ERR "VTFS: async I/O failed: %ld\n", res);
+  }
+
+  kfree(ctx->kbuf);
+  kfree(ctx);
+
+  ctx->kiocb->ki_complete(ctx->kiocb, res);
+}
+
+ssize_t vtfs_read_iter(struct kiocb* iocb, struct iov_iter* to) {
+  LOG("IN READ ITER\n");
+  struct inode* inode = file_inode(iocb->ki_filp);
+  loff_t pos = iocb->ki_pos;
+  size_t count = iov_iter_count(to);
+
+  if (!count)
+    return 0;
+
+  if (!is_sync_kiocb(iocb)) {
+    LOG("ASYNC READ ITER\n");
+    struct vtfs_io_ctx* ctx = kmalloc(sizeof(*ctx), GFP_KERNEL);
+    if (!ctx)
+      return -ENOMEM;
+
+    ctx->kiocb = iocb;
+    ctx->ino = inode->i_ino;
+    ctx->pos = pos;
+    ctx->len = count;
+    ctx->is_write = false;
+
+    ctx->pages = NULL;
+    ctx->nr_pages = 0;
+    ctx->page_offset = 0;
+
+    unsigned int max_pages = (count + PAGE_SIZE - 1) / PAGE_SIZE + 1;
+    ctx->pages = kmalloc_array(max_pages, sizeof(struct page*), GFP_KERNEL);
+    if (!ctx->pages) {
+      kfree(ctx);
+      return -ENOMEM;
+    }
+
+    ssize_t bytes_got = iov_iter_get_pages2(to, ctx->pages, count, max_pages, &ctx->page_offset);
+    if (bytes_got < 0) {
+      LOG("iov_iter_get_pages2 failed: %ld\n", bytes_got);
+      kfree(ctx->pages);
+      kfree(ctx);
+      return bytes_got;
+    }
+
+    ctx->nr_pages = 0;
+    while (ctx->nr_pages < max_pages && ctx->pages[ctx->nr_pages] != NULL) {
+      ctx->nr_pages++;
+    }
+    LOG("Pinned %u pages, offset %zu, bytes %ld\n", ctx->nr_pages, ctx->page_offset, bytes_got);
+
+    ctx->kbuf = kmalloc(count, GFP_KERNEL);
+    if (!ctx->kbuf) {
+      kfree(ctx);
+      return -ENOMEM;
+    }
+
+    INIT_WORK(&ctx->work, vtfs_io_worker);
+    queue_work(vtfs_wq, &ctx->work);
+
+    return -EIOCBQUEUED;
+  }
+
+  LOG("SYNC READ ITER\n");
+
+  char* kbuf = kmalloc(count, GFP_KERNEL);
+  if (!kbuf)
+    return -ENOMEM;
+
+  ssize_t ret = vtfs_storage_read_file(inode->i_ino, pos, count, kbuf);
+  if (ret > 0) {
+    if (copy_to_iter(kbuf, ret, to) != ret)
+      ret = -EFAULT;
+    iocb->ki_pos = pos + ret;
+  }
+  kfree(kbuf);
+  return ret;
+}
+
 ssize_t vtfs_write(struct file* filp, const char __user* buffer, size_t len, loff_t* offset) {
+  LOG("IN WRITE\n");
   if (!len)
     return 0;
 
@@ -291,6 +477,69 @@ ssize_t vtfs_write(struct file* filp, const char __user* buffer, size_t len, lof
   *offset += written;
   filp->f_inode->i_size = new_size;
   return written;
+}
+
+ssize_t vtfs_write_iter(struct kiocb* iocb, struct iov_iter* from) {
+  LOG("IN WRITE ITER\n");
+  struct inode* inode = file_inode(iocb->ki_filp);
+  loff_t pos = iocb->ki_pos;
+  size_t count = iov_iter_count(from);
+
+  if (!count)
+    return 0;
+
+  if (iocb->ki_filp->f_flags & O_APPEND)
+    pos = i_size_read(inode);
+
+  if (!is_sync_kiocb(iocb)) {
+    LOG("ASYNC WRITE ITER\n");
+    struct vtfs_io_ctx* ctx = kmalloc(sizeof(*ctx), GFP_KERNEL);
+    if (!ctx)
+      return -ENOMEM;
+
+    ctx->kiocb = iocb;
+    ctx->ino = inode->i_ino;
+    ctx->pos = pos;
+    ctx->len = count;
+    ctx->is_write = true;
+
+    ctx->kbuf = kmalloc(count, GFP_KERNEL);
+    if (!ctx->kbuf) {
+      kfree(ctx);
+      return -ENOMEM;
+    }
+
+    if (!copy_from_iter_full(ctx->kbuf, count, from)) {
+      kfree(ctx->kbuf);
+      kfree(ctx);
+      return -EFAULT;
+    }
+
+    INIT_WORK(&ctx->work, vtfs_io_worker);
+    queue_work(vtfs_wq, &ctx->work);
+
+    return -EIOCBQUEUED;
+  }
+
+  LOG("SYNC WRITE ITER\n");
+
+  char* kbuf = kmalloc(count, GFP_KERNEL);
+  if (!kbuf)
+    return -ENOMEM;
+
+  if (!copy_from_iter_full(kbuf, count, from)) {
+    kfree(kbuf);
+    return -EFAULT;
+  }
+
+  loff_t new_size;
+  ssize_t ret = vtfs_storage_write_file(inode->i_ino, pos, kbuf, count, &new_size);
+  if (ret > 0) {
+    iocb->ki_pos = pos + ret;
+    i_size_write(inode, new_size);
+  }
+  kfree(kbuf);
+  return ret;
 }
 
 int vtfs_link(struct dentry* old_dentry, struct inode* parent_inode, struct dentry* new_dentry) {
